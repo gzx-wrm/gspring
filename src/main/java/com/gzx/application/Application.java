@@ -10,7 +10,7 @@ import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 
 @Configuration
-@ComponentScan("com.gzx.application.service.impl")
+@ComponentScan(value = {"com.gzx.application.service.impl", "com.gzx.application.processor"})
 public class Application {
 
     public static void main(String[] args) throws Exception {

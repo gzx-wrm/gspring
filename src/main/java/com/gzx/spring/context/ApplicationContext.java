@@ -5,6 +5,7 @@ import com.gzx.spring.annotation.Component;
 import com.gzx.spring.annotation.ComponentScan;
 import com.gzx.spring.bean.BeanDefinition;
 import com.gzx.spring.enums.Scope;
+import com.gzx.spring.factory.BeanPostProcessor;
 import com.gzx.spring.factory.InitializingBean;
 
 import java.beans.Introspector;
@@ -13,7 +14,10 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.lang.reflect.*;
 import java.net.URL;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedList;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -25,60 +29,72 @@ public class ApplicationContext {
     private Class clazz;
 
     private ConcurrentHashMap<String, BeanDefinition> beanDefinitionNameMap = new ConcurrentHashMap<>();
-    
+
     public ConcurrentHashMap<String, Object> singletonBeanMap = new ConcurrentHashMap<>();
 
-    public ApplicationContext(Class clazz) throws IOException, ClassNotFoundException {
+    private List<BeanPostProcessor> beanPostProcessors;
+
+    public ApplicationContext(Class clazz) throws IOException, ClassNotFoundException, InstantiationException, IllegalAccessException {
         clazz = clazz;
+        beanPostProcessors = Collections.synchronizedList(new LinkedList<>());
 
         ClassLoader classLoader = ApplicationContext.class.getClassLoader();
         // 1. 包扫描
         if (clazz.isAnnotationPresent(ComponentScan.class)) {
             // 1.1 拿到ComponentScan注解标识的包名
             ComponentScan componentScan = (ComponentScan) clazz.getAnnotation(ComponentScan.class);
-            String packageName = componentScan.value();
+            String[] packageNames = componentScan.value();
 
-            // 1.2 通过报名获取包下的所有类文件 .class，这个过程借助类加载器实现
-            String packagePath = packageName.replace('.', '/');
-            URL scanPackage = classLoader.getResource(packagePath);
-            File f = new File(scanPackage.getFile());
-            if (!f.exists() || !f.isDirectory()) {
-                throw new FileNotFoundException(f.getAbsolutePath() + "is not found or is not a directory");
-            }
-            File[] files = f.listFiles();
-            // 1.2.1 扫描所有文件，找出.class文件
-            for (File classFile : files) {
-                if (!classFile.getName().endsWith(".class")) {
-                    continue;
+            for (String packageName : packageNames) {
+                // 1.2 通过报名获取包下的所有类文件 .class，这个过程借助类加载器实现
+                String packagePath = packageName.replace('.', '/');
+                URL scanPackage = classLoader.getResource(packagePath);
+                File f = new File(scanPackage.getFile());
+                if (!f.exists() || !f.isDirectory()) {
+                    throw new FileNotFoundException(f.getAbsolutePath() + "is not found or is not a directory");
                 }
-                // 1.3 判断这些类是否是Component，如果是则初始化beanDefinition
-                // todo: 考虑子包的情况
-                LinkedList<String> classNameList = new LinkedList<>();
-                classNameList.add(packageName);
+                File[] files = f.listFiles();
+                // 1.2.1 扫描所有文件，找出.class文件
+                for (File classFile : files) {
+                    if (!classFile.getName().endsWith(".class")) {
+                        continue;
+                    }
+                    // 1.3 判断这些类是否是Component，如果是则初始化beanDefinition
+                    // todo: 考虑子包的情况
+                    LinkedList<String> classNameList = new LinkedList<>();
+                    classNameList.add(packageName);
 
-
-                String className = classFile.getName().substring(0, classFile.getName().length() - 6);
-                classNameList.add(className);
+                    String className = classFile.getName().substring(0, classFile.getName().length() - 6);
+                    classNameList.add(className);
 
 //                System.out.println(className);
-                Class<?> c = classLoader.loadClass(classNameList.stream().collect(Collectors.joining(".")));
-                if (!c.isAnnotationPresent(Component.class)) {
-                    continue;
-                }
-                Component component = c.getAnnotation(Component.class);
-                String componentName = component.value();
-                if (componentName.isEmpty()) {
-                    componentName = Introspector.decapitalize(c.getSimpleName());
+                    Class<?> c = classLoader.loadClass(classNameList.stream().collect(Collectors.joining(".")));
+                    if (!c.isAnnotationPresent(Component.class)) {
+                        continue;
+                    }
+                    Component component = c.getAnnotation(Component.class);
+
+                    if (BeanPostProcessor.class.isAssignableFrom(c)) {
+                        Object beanPostProcessor = c.newInstance();
+                        beanPostProcessors.add((BeanPostProcessor) beanPostProcessor);
+                        continue;
+                    }
+
+                    String componentName = component.value();
+                    if (componentName.isEmpty()) {
+                        componentName = Introspector.decapitalize(c.getSimpleName());
 //                    System.out.println("componentName: " + componentName);
-                }
+                    }
 //                System.out.println(componentName);
-                // 1.3.1 初始化beanDefinition，保存到容器中
-                // todo: 这里默认是根据bean name获取，可以考虑根据name获取不到时根据type获取
-                // todo: 名称重复的情况？
-                BeanDefinition beanDefinition = new BeanDefinition(c, component.scope());
-                beanDefinitionNameMap.put(componentName, beanDefinition);
+                    // 1.3.1 初始化beanDefinition，保存到容器中
+                    // todo: 这里默认是根据bean name获取，可以考虑根据name获取不到时根据type获取
+                    // todo: 名称重复的情况？
+                    BeanDefinition beanDefinition = new BeanDefinition(c, component.scope());
+                    beanDefinitionNameMap.put(componentName, beanDefinition);
+                }
+
             }
-            
+
             // 1.4 根据是否是单例模式初始化bean，如果是多例模式的话则在get的时候再初始化
             beanDefinitionNameMap.forEach((k, v) -> {
                 Scope scope = v.getScope();
@@ -100,8 +116,6 @@ public class ApplicationContext {
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
-                // 1.4.1 可以将构造出来的bean再重新以class分类装入容器中
-//                loadBeanByClass(bean);
                 singletonBeanMap.put(k, bean);
             });
         }
@@ -118,11 +132,11 @@ public class ApplicationContext {
             throw new RuntimeException("Bean: " + beanName + " not found");
         }
 
-        Object o = createBean(beanDefinition);
+        Object o = createBean(beanDefinition, beanName);
         return o;
     }
 
-    private Object createBean(BeanDefinition beanDefinition) throws Exception {
+    private Object createBean(BeanDefinition beanDefinition, String beanName) throws Exception {
         // 根据beanDefinition构造一个对象
         Class<?> beanClass = beanDefinition.getBeanClass();
         // todo: 根据不同的构造方法以及Autowired注解在构造bean时进行依赖注入
@@ -150,8 +164,13 @@ public class ApplicationContext {
             }
             field.setAccessible(true);
             // 尝试从单例对象容器中获取，如果获取不到则进入递推步骤，从这里就有了“循环依赖”的问题
-            String beanName = getAutowiredBeanName(field);
-            field.set(o, getBean(beanName));
+            String beanName1 = getAutowiredBeanName(field);
+            field.set(o, getBean(beanName1));
+        }
+
+        // 根据用户自定义的postProcessor对bean进行处理
+        for (BeanPostProcessor beanPostProcessor : beanPostProcessors) {
+            o = beanPostProcessor.postProcessBeforeInitialization(o, beanName);
         }
 
         // 可选: 实例化bean之后的逻辑
@@ -159,16 +178,11 @@ public class ApplicationContext {
             ((InitializingBean) o).afterPropertiesSet();
         }
 
-        // 实际上, spring返回的bean是经过代理的对象，使用代理可以在不更改class的同时为对象赋予更多功能
-        Object o1 = Proxy.newProxyInstance(o.getClass().getClassLoader(), o.getClass().getInterfaces(), (proxy, method, args) -> {
-            System.out.println("before method: " + method.getName());
-            // 如果不进行额外判断，这里会将对象o的所有方法都进行代理
-            Object result = method.invoke(o, args);
-            System.out.println("after method: " + method.getName());
+        for (BeanPostProcessor beanPostProcessor : beanPostProcessors) {
+            o = beanPostProcessor.postProcessAfterInitialization(o, beanName);
+        }
 
-            return result;
-        });
-        return o1;
+        return o;
     }
 
     private String getAutowiredBeanName(Field field) {
